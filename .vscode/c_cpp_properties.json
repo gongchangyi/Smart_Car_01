@@ -2,6 +2,7 @@
     "configurations": [
         {
             "name": "STM32F103-SmartCar10",
+            "compilerPath": "D:/STM32_Dev_Env/01.Compiler/arm-gcc/gcc-arm-none-eabi-10.3-2021.10/bin/arm-none-eabi-gcc.exe",
             "includePath": [
                 "d:/STM32_Dev_Env/04.SourceCode/Smart_Car_01/Smart_Car - 10/User",
                 "d:/STM32_Dev_Env/04.SourceCode/Smart_Car_01/Smart_Car - 10/User/API",

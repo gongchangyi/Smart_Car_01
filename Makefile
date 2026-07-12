@@ -40,10 +40,10 @@ ASM_SOURCES := $(STARTUP)/startup_stm32f10x_hd_gcc.s
 
 # ===== 头文件 & 宏 =====
 INCLUDES    := -I$(USER) -I$(API) -I$(CMSIS) -I$(LIBINC)
-DEFINES     := -DSTM32F10X_HD -DUSE_STDPERIPH_DRIVER
+DEFINES     := -DSTM32F10X_HD -DUSE_STDPERIPH_DRIVER 
 
 # ===== 编译选项 =====
-CFLAGS      := -mcpu=$(MCU) -mthumb -std=c99
+CFLAGS      := -mcpu=$(MCU) -mthumb -std=c99 -include User/API/compat.h
 CFLAGS      += -O2 -g -ffunction-sections -fdata-sections
 CFLAGS      += -Wall -Wno-unused
 CFLAGS      += $(DEFINES) $(INCLUDES)

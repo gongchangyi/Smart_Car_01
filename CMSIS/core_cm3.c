@@ -684,8 +684,7 @@ uint8_t __LDREXB(uint8_t *addr)
 {
     uint8_t result=0;
   
-   __ASM volatile ("ldrexb %0, [%1]" : "=r" (result) : "r" (addr) );
-   return(result);
+   return __builtin_arm_ldrexb(addr);
 }
 
 /**
@@ -700,8 +699,7 @@ uint16_t __LDREXH(uint16_t *addr)
 {
     uint16_t result=0;
   
-   __ASM volatile ("ldrexh %0, [%1]" : "=r" (result) : "r" (addr) );
-   return(result);
+   return __builtin_arm_ldrexh(addr);
 }
 
 /**
@@ -716,8 +714,7 @@ uint32_t __LDREXW(uint32_t *addr)
 {
     uint32_t result=0;
   
-   __ASM volatile ("ldrex %0, [%1]" : "=r" (result) : "r" (addr) );
-   return(result);
+   return __builtin_arm_ldrex(addr);
 }
 
 /**
@@ -733,8 +730,7 @@ uint32_t __STREXB(uint8_t value, uint8_t *addr)
 {
    uint32_t result=0;
   
-   __ASM volatile ("strexb %0, %2, [%1]" : "=r" (result) : "r" (addr), "r" (value) );
-   return(result);
+   return __builtin_arm_strexb(value, addr);
 }
 
 /**
@@ -750,8 +746,7 @@ uint32_t __STREXH(uint16_t value, uint16_t *addr)
 {
    uint32_t result=0;
   
-   __ASM volatile ("strexh %0, %2, [%1]" : "=r" (result) : "r" (addr), "r" (value) );
-   return(result);
+   return __builtin_arm_strexh(value, addr);
 }
 
 /**
@@ -767,8 +762,7 @@ uint32_t __STREXW(uint32_t value, uint32_t *addr)
 {
    uint32_t result=0;
   
-   __ASM volatile ("strex %0, %2, [%1]" : "=r" (result) : "r" (addr), "r" (value) );
-   return(result);
+   return __builtin_arm_strex(value, addr);
 }
 
 

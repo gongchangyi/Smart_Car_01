@@ -6,13 +6,13 @@ void Systick_Init(uint32_t time)
 	SysTick_Config(time);
 }
 
-// 全局毫秒计数器（SysTick 每 1ms 中断自增一次）
+// 全锟街猴拷锟斤拷锟斤拷锟斤拷锟斤拷锟絊ysTick 每 1ms 锟叫讹拷锟斤拷锟斤拷一锟轿ｏ拷
 volatile uint32_t g_ms_tick = 0;
 
-//中断服务函数名字固定，没有参数，没有返回值
+//锟叫断凤拷锟斤拷锟斤拷锟斤拷锟街固讹拷锟斤拷没锟叫诧拷锟斤拷锟斤拷没锟叫凤拷锟斤拷值
 void SysTick_Handler(void)
 {
-	g_ms_tick++;	//1ms进入一次
+	g_ms_tick++;	//1ms锟斤拷锟斤拷一锟斤拷
 }
 
 void Delay_nop_nus(uint32_t time)
