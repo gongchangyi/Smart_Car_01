@@ -1,5 +1,6 @@
 #include "main.h"
 #include "lcd.h"
+#include "beep.h"
 
 // 蓝牙遥控 - 8个指令控制4个轮子 + 超声波避障（V3:超声波测距+绕行避障）
 
@@ -257,6 +258,9 @@ int main(void)
     // 初始化电机
     Motor_Init();
 
+    // 初始化蜂鸣器（PB15，避障提示音）
+    BEEP_Init();
+
     // 初始化超声波避障传感器
     USONIC_Init();
 
@@ -459,6 +463,7 @@ int main(void)
                         if(g_obstacle_count >= USONIC_DEBOUNCE_THRESHOLD)
                         {
                             Bluetooth_SendString("WARN:OBSTACLE\r\n");
+                            BEEP_Beep(300);   // 发现障碍：蜂鸣器提示 300ms
 
                             // 执行绕行避障，获取恢复后的命令
                             g_current_cmd = Avoid_Obstacle();

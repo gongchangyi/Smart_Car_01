@@ -31,6 +31,7 @@ C_SOURCES   := \
 	$(API)/sensor.c \
 	$(API)/lcd.c \
 	$(API)/bluetooth.c \
+	$(API)/beep.c \
 	$(CMSIS)/core_cm3.c \
 	$(wildcard $(LIBSRC)/*.c)
 
