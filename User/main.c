@@ -29,7 +29,12 @@ extern volatile uint32_t g_ms_tick;
 // 避障消抖计数器
 static uint8_t g_obstacle_count = 0;      // 连续检测到障碍物的次数
 #define USONIC_DEBOUNCE_THRESHOLD  2       // 连续2次确认才触发避障（超声波本身较稳定，不需要太多滤波）
-#define AVOID_SPIN_TIMEOUT        150      // 遇障最大旋转次数(150*20ms≈3s)，超时则停车等待
+// 避障：判定成功后先停，再以 AVOID_SPIN_SPEED 原地转圈（右顺+左逆=cmd'5'）找空当；
+// 转圈中前方一畅通就直接前进；转满一圈仍被挡则后退一点换位置再转；总超时则停车。
+#define AVOID_SPIN_SPEED       38      // 避障转圈/后退时的临时速度(%)
+#define AVOID_SPIN_PER_ROUND   75      // 原地转一圈约需的 20ms 次数(@40%)，转满一圈仍堵则后退换位置
+#define AVOID_SPIN_TOTAL       600     // 避障总超时(600*20ms=12s)，超时则停车等待新指令
+#define AVOID_RETREAT_MS       300     // 每次后退的时长(ms)，"后退一点点"
 
 // 停止所有电机（互斥复位全部方向引脚，避免H桥直通）
 static void All_Motor_Stop(void)
@@ -99,21 +104,32 @@ static void Execute_Motion(uint8_t cmd)
     }
 }
 
-// 根据当前速度动态计算避障判定距离（速度越快，越早判障、留出更多转向余量）
-// 实测标定（满电、干爽地面）：
-//   40% 速度 -> 70cm 才够转弯（阈值更低会在反应延迟内撞墙）
-//   70% 速度 -> 100cm 仍不够（已撞），需 >100cm
-// 故采用较陡的线性映射：阈值(cm) = 55 + speed，并钳位到 [55, 150]
-//   40% -> 95cm   70% -> 125cm   100% -> 150cm（HC-SR04 量程 400cm，余量充足）
-// 说明：阈值偏低会在"消抖200ms + 提示音"的反应延迟内直冲撞墙；
-//       阈值偏高只会更早转弯（更安全，最多在远处多转一下），故宁大勿小。
-#define OBSTACLE_MIN_CM   55      // 低速时的最小判障距离
-#define OBSTACLE_MAX_CM   150     // 满速时的最大判障距离（留足余量，避免撞墙）
+// 根据当前速度动态计算避障判定距离。
+// 用户标定（2026-07-12，实测）：20%~70% 区间按速度递增设定转弯反应距离：
+//   20%->30  30%->40  40%->50  50%->60  60%->75  70%->90  (cm)
+// 20%~50% 段斜率 +1cm/%，50%~70% 段斜率 +1.5cm/%，分段线性插值。
+// 其余速度档（<20% 或 >70%）本次暂不调整，沿用旧公式 55+speed 钳位 [55,150]。
+// HC-SR04 量程 400cm，余量充足。
+#define OBSTACLE_MIN_CM   55      // 低速档(<20%)使用的最小判障距离
+#define OBSTACLE_MAX_CM   150     // 高速档(>70%)使用的最大判障距离
 static uint16_t Obstacle_Threshold_CM(void)
 {
-    uint16_t th = (uint16_t)(55 + g_user_speed);  // 40->95, 70->125, 100->155
+    uint8_t s = g_user_speed;
+
+    // 用户标定区间 20%~70%：分段线性，精确匹配标定点
+    if (s >= 20 && s <= 70)
+    {
+        if      (s <= 30) return (uint16_t)(30 + (s - 20));          // 20~30: +1cm/%
+        else if (s <= 40) return (uint16_t)(40 + (s - 30));          // 30~40: +1cm/%
+        else if (s <= 50) return (uint16_t)(50 + (s - 40));          // 40~50: +1cm/%
+        else if (s <= 60) return (uint16_t)(60 + (s - 50) * 3 / 2);  // 50~60: +1.5cm/%
+        else              return (uint16_t)(75 + (s - 60) * 3 / 2);  // 60~70: +1.5cm/%
+    }
+
+    // 其他速度档（<20% 或 >70%）：沿用原公式 55+speed，钳位 [55,150]
+    uint16_t th = (uint16_t)(55 + s);
     if(th < OBSTACLE_MIN_CM) th = OBSTACLE_MIN_CM;
-    if(th > OBSTACLE_MAX_CM) th = OBSTACLE_MAX_CM;  // 满速钳到 150cm
+    if(th > OBSTACLE_MAX_CM) th = OBSTACLE_MAX_CM;
     return th;
 }
 
@@ -124,15 +140,13 @@ static uint8_t Front_Blocked(void)
     return (d > 0 && d < Obstacle_Threshold_CM()) ? 1 : 0;
 }
 
-// 避障绕行动作（方案C）：
-//   第1轮向右转找空当；若右侧整片被挡（正前+右前都有障、右转不通），
-//   第2轮改为向左转找空当；两侧都转满仍被挡（宽墙/封闭空间）则停车等待新指令。
-//   超声波为单点测距、无方向信息，左右各试一轮可覆盖"正前+右前都有障"的场景，
-//   避免一律右转而径直撞上右前障碍。
-//   注意：单点测距无法 100% 根治该场景（车头转到侧面空隙可能误判畅通），
-//   彻底解决需再加一个朝右前 45° 的超声波（方案B）。
-// 避障绕行期间，检查用户是否发来新遥控指令（'1'~'8'）或紧急停止。
-// 一旦收到即中断避障、由用户接管；返回该指令；否则返回0。
+// 避障绕行动作（新方案）：
+//   判定成功后先停止 -> 以 30% 速度原地转圈（右侧顺时针+左侧逆时针=cmd'5'）找空当；
+//   转圈过程中若前方畅通，直接向前（恢复用户速度）；
+//   若转满一圈仍被挡（原地打转找不到空当），则后退一点点换位置，接着转，直到能前进；
+//   总超时(12s)仍被挡（封闭/宽墙）则停车等待新指令。
+//   超声波为单点正前方测距：转圈时车头扫过 360°，某方向畅通即 !Front_Blocked 即前进。
+// 避障期间检查用户是否发来新遥控指令（'1'~'8'）或紧急停止，收到即中断、由用户接管。
 static uint8_t Avoid_UserAbort(void)
 {
     // 最高优先级：中断已物理停车，这里同步逻辑状态并退出避障
@@ -153,64 +167,62 @@ static uint8_t Avoid_UserAbort(void)
 
 static uint8_t Avoid_Obstacle(void)
 {
+    uint8_t  user_spd = g_user_speed;   // 记住用户原速度，避障结束恢复
     uint16_t spin = 0;
 
-    // 进入避障前先检查：若已收到停止指令（如蜂鸣器提示期间用户按了停止），
-    // 直接返回停止，绝不启动绕行电机。
+    // 进入避障前先检查：若已收到停止指令，直接返回停止，绝不启动绕行电机
     if (Bluetooth_StopPending())
     {
         Bluetooth_ClearStop();
         return '2';
     }
 
-    // 第1轮：向右转，直到正前方畅通或超时
-    Bluetooth_SendString("AVOID:SPIN_R\r\n");
-    Execute_Motion('8');                       // 右转
-
-    while(Front_Blocked() && (spin < AVOID_SPIN_TIMEOUT))
-    {
-        if (Avoid_UserAbort())                 // 用户发指令则立即接管（停止/转向），中断避障
-        {
-            All_Motor_Stop();
-            return g_current_cmd;
-        }
-        Delay_nop_nms(20);
-        spin++;
-    }
+    // 1. 先停止
     All_Motor_Stop();
 
-    if(!Front_Blocked())
-    {
-        Bluetooth_SendString("AVOID:OK_R\r\n");
-        return '3';                            // 右侧找到空当，恢复前进
-    }
+    // 2. 以 30% 速度原地转圈（右顺+左逆 = cmd'5'），找空当
+    Motor_SetSpeed(AVOID_SPIN_SPEED);
+    Bluetooth_SendString("AVOID:SPIN@38\r\n");
+    Execute_Motion('5');                 // 左转圈（原地）
 
-    // 第2轮：右侧整片被挡，改为向左转找空当
-    Bluetooth_SendString("AVOID:SPIN_L\r\n");
-    spin = 0;
-    Execute_Motion('7');                       // 左转
-
-    while(Front_Blocked() && (spin < AVOID_SPIN_TIMEOUT))
+    while (spin < AVOID_SPIN_TOTAL)
     {
-        if (Avoid_UserAbort())                 // 用户发指令则立即接管（停止/转向），中断避障
+        // 用户发指令则立即接管（停止/转向），中断避障
+        if (Avoid_UserAbort())
         {
             All_Motor_Stop();
+            Motor_SetSpeed(user_spd);    // 恢复用户速度
             return g_current_cmd;
         }
+
+        // 转圈过程中若前方畅通，直接向前（恢复用户速度）
+        if (!Front_Blocked())
+        {
+            All_Motor_Stop();
+            Motor_SetSpeed(user_spd);
+            Bluetooth_SendString("AVOID:OK\r\n");
+            return '3';                  // 前进
+        }
+
         Delay_nop_nms(20);
         spin++;
+
+        // 转满一圈仍被挡：后退一点点换位置，再继续转圈
+        if (spin % AVOID_SPIN_PER_ROUND == 0)
+        {
+            Bluetooth_SendString("AVOID:RETREAT\r\n");
+            Execute_Motion('1');         // 后退
+            Delay_nop_nms(AVOID_RETREAT_MS);
+            All_Motor_Stop();
+            Execute_Motion('5');         // 继续转圈
+        }
     }
+
+    // 总超时仍被挡（封闭/宽墙），停车等待新指令
     All_Motor_Stop();
-
-    if(!Front_Blocked())
-    {
-        Bluetooth_SendString("AVOID:OK_L\r\n");
-        return '3';                            // 左侧找到空当，恢复前进
-    }
-
-    // 两侧都转满仍被挡（封闭/宽墙），停车等待新指令
+    Motor_SetSpeed(user_spd);
     Bluetooth_SendString("AVOID:STUCK\r\n");
-    return '2';                               // 停止
+    return '2';                          // 停止
 }
 
 // ===================== LCD 状态显示 =====================
