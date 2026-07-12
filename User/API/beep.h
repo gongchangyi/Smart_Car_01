@@ -3,8 +3,11 @@
 
 #include "stm32f10x.h"
 
-// 蜂鸣器引脚（用户确认：PB15）
-#define BEEP_PORT   GPIOB
+// 蜂鸣器引脚：硬件实际接在 PA15（用户确认）。
+// 注意：PA15 默认是 JTAG 的 JTDI 调试脚，本项目在 main.c 初始化时已通过
+// GPIO_PinRemapConfig(GPIO_Remap_SWJ_JTAGDisable, ENABLE) 关闭 JTAG、保留 SWD，
+// 从而把 PA15 释放为普通 GPIO，故可正常用作蜂鸣器输出。
+#define BEEP_PORT   GPIOA
 #define BEEP_PIN    GPIO_Pin_15
 
 // 蜂鸣器有效电平：1 = 高电平响（常见信盈达/正点原子板）。

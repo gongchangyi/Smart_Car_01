@@ -5,7 +5,7 @@
 void BEEP_Init(void)
 {
     GPIO_InitTypeDef gpio;
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
 
     gpio.GPIO_Pin   = BEEP_PIN;
     gpio.GPIO_Mode  = GPIO_Mode_Out_PP;     // 推挽输出
