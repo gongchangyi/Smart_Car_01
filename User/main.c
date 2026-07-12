@@ -120,15 +120,20 @@ static uint8_t Front_Blocked(void)
     return (d > 0 && d < Obstacle_Threshold_CM()) ? 1 : 0;
 }
 
-// 避障绕行动作：持续旋转直到前方畅通（带超时），返回恢复后的运动命令
-// 超声波为单点测距，无方向信息，统一向右旋转避障
+// 避障绕行动作（方案C）：
+//   第1轮向右转找空当；若右侧整片被挡（正前+右前都有障、右转不通），
+//   第2轮改为向左转找空当；两侧都转满仍被挡（宽墙/封闭空间）则停车等待新指令。
+//   超声波为单点测距、无方向信息，左右各试一轮可覆盖"正前+右前都有障"的场景，
+//   避免一律右转而径直撞上右前障碍。
+//   注意：单点测距无法 100% 根治该场景（车头转到侧面空隙可能误判畅通），
+//   彻底解决需再加一个朝右前 45° 的超声波（方案B）。
 static uint8_t Avoid_Obstacle(void)
 {
-    uint16_t spin = 0;    // 旋转计数（超时保护）
+    uint16_t spin = 0;
 
-    // 持续右转，直到前方无障碍（车头已朝向开阔处）或超时
-    Bluetooth_SendString("AVOID:SPIN\r\n");
-    Execute_Motion('8');   // 右转
+    // 第1轮：向右转，直到正前方畅通或超时
+    Bluetooth_SendString("AVOID:SPIN_R\r\n");
+    Execute_Motion('8');                       // 右转
 
     while(Front_Blocked() && (spin < AVOID_SPIN_TIMEOUT))
     {
@@ -137,15 +142,33 @@ static uint8_t Avoid_Obstacle(void)
     }
     All_Motor_Stop();
 
-    if(spin >= AVOID_SPIN_TIMEOUT)
+    if(!Front_Blocked())
     {
-        // 旋转很久仍前方有障碍（宽墙/封闭空间），停车等待新指令
-        Bluetooth_SendString("AVOID:STUCK\r\n");
-        return '2';       // 停止
+        Bluetooth_SendString("AVOID:OK_R\r\n");
+        return '3';                            // 右侧找到空当，恢复前进
     }
 
-    // 前方已畅通，恢复前进
-    return '3';
+    // 第2轮：右侧整片被挡，改为向左转找空当
+    Bluetooth_SendString("AVOID:SPIN_L\r\n");
+    spin = 0;
+    Execute_Motion('7');                       // 左转
+
+    while(Front_Blocked() && (spin < AVOID_SPIN_TIMEOUT))
+    {
+        Delay_nop_nms(20);
+        spin++;
+    }
+    All_Motor_Stop();
+
+    if(!Front_Blocked())
+    {
+        Bluetooth_SendString("AVOID:OK_L\r\n");
+        return '3';                            // 左侧找到空当，恢复前进
+    }
+
+    // 两侧都转满仍被挡（封闭/宽墙），停车等待新指令
+    Bluetooth_SendString("AVOID:STUCK\r\n");
+    return '2';                               // 停止
 }
 
 // ===================== LCD 状态显示 =====================
