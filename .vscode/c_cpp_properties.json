@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "name": "STM32F103-SmartCar10",
+            "includePath": [
+                "d:/STM32_Dev_Env/04.SourceCode/Smart_Car_01/Smart_Car - 10/User",
+                "d:/STM32_Dev_Env/04.SourceCode/Smart_Car_01/Smart_Car - 10/User/API",
+                "d:/STM32_Dev_Env/04.SourceCode/Smart_Car_01/Smart_Car - 10/CMSIS",
+                "d:/STM32_Dev_Env/04.SourceCode/Smart_Car_01/Smart_Car - 10/STM32F10x_StdPeriph_Driver/inc",
+                "d:/STM32_Dev_Env/04.SourceCode/Smart_Car_01/Smart_Car - 10/StartUp"
+            ],
+            "defines": [
+                "USE_STDPERIPH_DRIVER",
+                "STM32F10X_HD"
+            ],
+            "cStandard": "c99",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "gcc-arm"
+        }
+    ],
+    "version": 4
+}
