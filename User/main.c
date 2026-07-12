@@ -98,6 +98,28 @@ static void Execute_Motion(uint8_t cmd)
     }
 }
 
+// 根据当前速度动态计算避障判定距离（速度越快，越早判障、留出更多刹车/转向余量）
+// 线性映射：阈值(cm) = 30 + speed/2，并钳位到 [60, 85]
+//   speed=0~60 -> 60cm（低速也保持够用的判障距离，不会太短）
+//   speed=70   -> 65cm（默认速度，经实测反应合适）
+//   speed=100  -> 80cm（满速，提前避障）
+#define OBSTACLE_MIN_CM   60      // 低速/中速时的最小判障距离（避免判障过短）
+#define OBSTACLE_MAX_CM   85      // 满速时的最大判障距离
+static uint16_t Obstacle_Threshold_CM(void)
+{
+    uint16_t th = (uint16_t)(30 + g_user_speed / 2);  // 0->30, 70->65, 100->80
+    if(th < OBSTACLE_MIN_CM) th = OBSTACLE_MIN_CM;    // 低速不低于60cm
+    if(th > OBSTACLE_MAX_CM) th = OBSTACLE_MAX_CM;
+    return th;
+}
+
+// 前方是否被障碍物挡住（用动态阈值判断；dist=0 视为空旷/未就绪=畅通）
+static uint8_t Front_Blocked(void)
+{
+    uint32_t d = USONIC_GetDistance();
+    return (d > 0 && d < Obstacle_Threshold_CM()) ? 1 : 0;
+}
+
 // 避障绕行动作：持续旋转直到前方畅通（带超时），返回恢复后的运动命令
 // 超声波为单点测距，无方向信息，统一向右旋转避障
 static uint8_t Avoid_Obstacle(void)
@@ -108,7 +130,7 @@ static uint8_t Avoid_Obstacle(void)
     Bluetooth_SendString("AVOID:SPIN\r\n");
     Execute_Motion('8');   // 右转
 
-    while(USONIC_IsObstacle() && (spin < AVOID_SPIN_TIMEOUT))
+    while(Front_Blocked() && (spin < AVOID_SPIN_TIMEOUT))
     {
         Delay_nop_nms(20);
         spin++;
@@ -248,6 +270,10 @@ int main(void)
     Bluetooth_SendByte(GPIO_ReadInputDataBit(USONIC_ECHO_PORT, USONIC_ECHO_PIN) ? '1' : '0');
     Bluetooth_SendString(" (TRIG=PB14, ECHO=PC6)\r\n");
 
+    // 诊断：DWT 计时器自检结果（1=可用精确计时, 0=已退回nop计时）
+    Bluetooth_SendString("DWT:");
+    Bluetooth_SendString(USONIC_DWT_OK() ? "OK\r\n" : "FALLBACK\r\n");
+
     // 诊断：验证 TRIG(PB14) 输出是否可控（翻转后读回应变化）
     GPIO_SetBits(USONIC_TRIG_PORT, USONIC_TRIG_PIN);
     Bluetooth_SendString("TRIG_T:");
@@ -377,6 +403,7 @@ int main(void)
         {
             static uint32_t last_meas_ms = 0;
             static uint32_t last_dist   = USONIC_MAX_CM + 1;  // 上一次有效距离缓存，初始视为超远(安全)
+            static uint8_t  meas_count  = 0;                   // 用于 1Hz 节流打印
             uint32_t now = g_ms_tick;
 
             if((now - last_meas_ms) >= USONIC_MEAS_INTERVAL)
@@ -393,11 +420,40 @@ int main(void)
                     last_dist = dist;
                 }
 
+                // 1Hz 节流距离回显：每 10 次测量(约1秒)打印一次，方便确认模块是否回波
+                if(++meas_count >= 10)
+                {
+                    meas_count = 0;
+                    Bluetooth_SendString("DIST:");
+                    if(dist == 0)
+                    {
+                        // 无回波：再次用缓存值提示，并附错误码
+                        Bluetooth_SendString("NORSP(cache=");
+                        if(last_dist > USONIC_MAX_CM) Bluetooth_SendString("?");
+                        else
+                        {
+                            Bluetooth_SendByte('0' + last_dist / 100);
+                            Bluetooth_SendByte('0' + (last_dist / 10) % 10);
+                            Bluetooth_SendByte('0' + last_dist % 10);
+                        }
+                        Bluetooth_SendString(") e");
+                        Bluetooth_SendByte('0' + USONIC_GetLastError());
+                        Bluetooth_SendString("\r\n");
+                    }
+                    else
+                    {
+                        Bluetooth_SendByte('0' + dist / 100);
+                        Bluetooth_SendByte('0' + (dist / 10) % 10);
+                        Bluetooth_SendByte('0' + dist % 10);
+                        Bluetooth_SendString("cm\r\n");
+                    }
+                }
+
                 // 仅在前进/转圈状态下做障碍判断（用缓存的有效距离）
                 if(g_current_cmd == '3' || g_current_cmd == '5' || g_current_cmd == '6')
                 {
-                    // 判断障碍：有效距离 < 阈值才触发
-                    if(last_dist > 0 && last_dist < USONIC_OBSTACLE_CM)
+                    // 判断障碍：有效距离 < 动态阈值才触发（阈值随速度增大）
+                    if(last_dist > 0 && last_dist < Obstacle_Threshold_CM())
                     {
                         g_obstacle_count++;
                         if(g_obstacle_count >= USONIC_DEBOUNCE_THRESHOLD)
@@ -406,6 +462,11 @@ int main(void)
 
                             // 执行绕行避障，获取恢复后的命令
                             g_current_cmd = Avoid_Obstacle();
+
+                            // 关键修复：恢复前进/恢复运动必须真正执行，
+                            // 否则车会停在 Avoid_Obstacle 内的 All_Motor_Stop 状态，
+                            // 表现为"右转到位后直接停止、面向空旷也不前进"
+                            Execute_Motion(g_current_cmd);
 
                             // 重置消抖计数器
                             g_obstacle_count = 0;

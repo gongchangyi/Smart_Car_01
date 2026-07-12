@@ -55,6 +55,11 @@
 #define HZ_YOU   15
 #define HZ_ZHANG 16
 #define HZ_YI    17
+#define HZ_SHI   18
+#define HZ_CHANG 19
+#define HZ_ZHU   20
+#define HZ_ZHI   21
+#define HZ_PENG  22
 
 // 函数声明
 void LCD_Init(void);

@@ -1,4 +1,5 @@
-﻿*.o
+# ---- 编译产物 (Makefile 生成) ----
+*.o
 *.d
 *.crf
 *.htm
@@ -9,15 +10,21 @@
 *.bin
 *.elf
 *.lst
+
+# ---- 构建输出目录 (Project/ 整体为编译产物) ----
 Project/
 Listings/
 Objects/
 build/
+
+# ---- IDE / 编辑器缓存 ----
 .mimocode/
 .vscode/*
 !.vscode/c_cpp_properties.json
 *.bak
 *~
+
+# ---- 操作系统 ----
 Thumbs.db
 Desktop.ini
 .DS_Store

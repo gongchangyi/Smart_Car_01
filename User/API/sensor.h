@@ -36,8 +36,10 @@
 
 // ============================================
 // 超声波避障传感器引脚（HC-SR04 兼容模块）
-// 原理图：TRIG->PA4(USAR_TRIG), ECHO->PA5(USAR_ECHO)
-// 模块供电：VCC-5V
+// 用户实测确认（原理图标 PA4/PA5 为错，以此为准）：
+//   TRIG -> PB14 (推挽输出)
+//   ECHO -> PC6  (浮空输入，FT 5V 容忍，可直连模块 5V 回波)
+// 模块供电：VCC 接 5~8V（内部稳压到 5V），所以 8V 供电不会烧
 // ============================================
 
 #define USONIC_TRIG_PORT    GPIOB
@@ -46,8 +48,8 @@
 #define USONIC_ECHO_PORT    GPIOC
 #define USONIC_ECHO_PIN     GPIO_Pin_6       // 回响信号输入（用户实测确认）
 
-// 避障距离阈值（单位：cm，小于此值判定为有障碍）
-#define USONIC_OBSTACLE_CM  20              // 20cm以内视为障碍物
+// 避障距离阈值（单位：cm，小于此值判定是有障碍）
+#define USONIC_OBSTACLE_CM  50              // 50cm以内视为障碍物（提前右转避障）
 #define USONIC_MAX_CM       400             // 超声波最大量程上限
 
 // 函数声明：红外循迹
@@ -59,5 +61,6 @@ void USONIC_Init(void);
 uint32_t USONIC_GetDistance(void);           // 返回距离(cm)，0表示超时/无回波
 uint8_t USONIC_IsObstacle(void);             // 返回1=有障碍，0=安全
 uint8_t USONIC_GetLastError(void);           // 返回上次测距错误码：0成功/1无回波/2脉宽异常
+uint8_t USONIC_DWT_OK(void);                 // 返回1=DWT计时可用，0=已退回nop计时
 
 #endif
