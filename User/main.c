@@ -99,18 +99,21 @@ static void Execute_Motion(uint8_t cmd)
     }
 }
 
-// 根据当前速度动态计算避障判定距离（速度越快，越早判障、留出更多刹车/转向余量）
-// 线性映射：阈值(cm) = 30 + speed/2，并钳位到 [60, 85]
-//   speed=0~60 -> 60cm（低速也保持够用的判障距离，不会太短）
-//   speed=70   -> 65cm（默认速度，经实测反应合适）
-//   speed=100  -> 80cm（满速，提前避障）
-#define OBSTACLE_MIN_CM   60      // 低速/中速时的最小判障距离（避免判障过短）
-#define OBSTACLE_MAX_CM   85      // 满速时的最大判障距离
+// 根据当前速度动态计算避障判定距离（速度越快，越早判障、留出更多转向余量）
+// 实测标定（满电、干爽地面）：
+//   40% 速度 -> 70cm 才够转弯（阈值更低会在反应延迟内撞墙）
+//   70% 速度 -> 100cm 仍不够（已撞），需 >100cm
+// 故采用较陡的线性映射：阈值(cm) = 55 + speed，并钳位到 [55, 150]
+//   40% -> 95cm   70% -> 125cm   100% -> 150cm（HC-SR04 量程 400cm，余量充足）
+// 说明：阈值偏低会在"消抖200ms + 提示音"的反应延迟内直冲撞墙；
+//       阈值偏高只会更早转弯（更安全，最多在远处多转一下），故宁大勿小。
+#define OBSTACLE_MIN_CM   55      // 低速时的最小判障距离
+#define OBSTACLE_MAX_CM   150     // 满速时的最大判障距离（留足余量，避免撞墙）
 static uint16_t Obstacle_Threshold_CM(void)
 {
-    uint16_t th = (uint16_t)(30 + g_user_speed / 2);  // 0->30, 70->65, 100->80
-    if(th < OBSTACLE_MIN_CM) th = OBSTACLE_MIN_CM;    // 低速不低于60cm
-    if(th > OBSTACLE_MAX_CM) th = OBSTACLE_MAX_CM;
+    uint16_t th = (uint16_t)(55 + g_user_speed);  // 40->95, 70->125, 100->155
+    if(th < OBSTACLE_MIN_CM) th = OBSTACLE_MIN_CM;
+    if(th > OBSTACLE_MAX_CM) th = OBSTACLE_MAX_CM;  // 满速钳到 150cm
     return th;
 }
 
@@ -128,9 +131,37 @@ static uint8_t Front_Blocked(void)
 //   避免一律右转而径直撞上右前障碍。
 //   注意：单点测距无法 100% 根治该场景（车头转到侧面空隙可能误判畅通），
 //   彻底解决需再加一个朝右前 45° 的超声波（方案B）。
+// 避障绕行期间，检查用户是否发来新遥控指令（'1'~'8'）或紧急停止。
+// 一旦收到即中断避障、由用户接管；返回该指令；否则返回0。
+static uint8_t Avoid_UserAbort(void)
+{
+    // 最高优先级：中断已物理停车，这里同步逻辑状态并退出避障
+    if (Bluetooth_StopPending())
+    {
+        Bluetooth_ClearStop();
+        g_current_cmd = '2';
+        return '2';
+    }
+    uint8_t c = Bluetooth_GetCommand();
+    if (c >= '1' && c <= '8')
+    {
+        g_current_cmd = c;   // 更新为用户的新指令
+        return c;
+    }
+    return 0;
+}
+
 static uint8_t Avoid_Obstacle(void)
 {
     uint16_t spin = 0;
+
+    // 进入避障前先检查：若已收到停止指令（如蜂鸣器提示期间用户按了停止），
+    // 直接返回停止，绝不启动绕行电机。
+    if (Bluetooth_StopPending())
+    {
+        Bluetooth_ClearStop();
+        return '2';
+    }
 
     // 第1轮：向右转，直到正前方畅通或超时
     Bluetooth_SendString("AVOID:SPIN_R\r\n");
@@ -138,6 +169,11 @@ static uint8_t Avoid_Obstacle(void)
 
     while(Front_Blocked() && (spin < AVOID_SPIN_TIMEOUT))
     {
+        if (Avoid_UserAbort())                 // 用户发指令则立即接管（停止/转向），中断避障
+        {
+            All_Motor_Stop();
+            return g_current_cmd;
+        }
         Delay_nop_nms(20);
         spin++;
     }
@@ -156,6 +192,11 @@ static uint8_t Avoid_Obstacle(void)
 
     while(Front_Blocked() && (spin < AVOID_SPIN_TIMEOUT))
     {
+        if (Avoid_UserAbort())                 // 用户发指令则立即接管（停止/转向），中断避障
+        {
+            All_Motor_Stop();
+            return g_current_cmd;
+        }
         Delay_nop_nms(20);
         spin++;
     }
@@ -319,6 +360,18 @@ int main(void)
     // 主循环
     while(1)
     {
+        // ===== 紧急停止（最高优先级）=====
+        // 串口中断收到 '2'/'4' 时已立即物理停车；这里同步逻辑状态，
+        // 确保避障/恢复等任何逻辑都不会再把电机启动起来。
+        if(Bluetooth_StopPending())
+        {
+            Bluetooth_ClearStop();
+            Motor_Stop();               // 再次确保停车
+            g_current_cmd   = '2';
+            g_obstacle_count = 0;
+            if(!g_show_image && !g_play_anim) LCD_UpdateStatus();
+        }
+
         // 获取蓝牙命令
         uint8_t cmd = Bluetooth_GetCommand();
 
@@ -486,7 +539,7 @@ int main(void)
                         if(g_obstacle_count >= USONIC_DEBOUNCE_THRESHOLD)
                         {
                             Bluetooth_SendString("WARN:OBSTACLE\r\n");
-                            BEEP_Beep(300);   // 发现障碍：蜂鸣器提示 300ms
+                            BEEP_Beep(100);   // 发现障碍：蜂鸣器短提示 100ms（缩短以尽快起步转弯，减少反应延迟内的冲撞距离）
 
                             // 执行绕行避障，获取恢复后的命令
                             g_current_cmd = Avoid_Obstacle();

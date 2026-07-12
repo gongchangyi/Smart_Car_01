@@ -34,5 +34,7 @@ void Bluetooth_Init(void);
 void Bluetooth_SendByte(uint8_t byte);
 void Bluetooth_SendString(char *str);
 uint8_t Bluetooth_GetCommand(void);
+uint8_t Bluetooth_StopPending(void);   // 是否有待处理的紧急停止请求
+void Bluetooth_ClearStop(void);        // 清除紧急停止标志
 
 #endif
