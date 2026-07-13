@@ -91,13 +91,16 @@ void Bluetooth_SendString(char *str)
 }
 
 // 获取命令
+// 单字符命令立即返回（'1'~'8'运动 / '9'/'0'调速±10% / 'm'/'n'微调±1% /
+// 'H'循迹 / 'O'静图 / 'A'动图 / 'P'状态页 / 'B'/'C'信息页）。
+// 已移除原 "00"/"11" 双字符组合，改用 'm' 减1% / 'n' 加1%。
 uint8_t Bluetooth_GetCommand(void)
 {
-    if(bt_rx_ready) {
-        bt_rx_ready = 0;
-        return bt_rx_data;
-    }
-    return 0;
+    if (!bt_rx_ready)
+        return 0;
+
+    bt_rx_ready = 0;
+    return bt_rx_data;
 }
 
 // 是否有待处理的紧急停止请求（中断已物理停车，此处供主循环同步逻辑状态）

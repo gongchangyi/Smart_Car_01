@@ -29,6 +29,10 @@
 #define CMD_MODE_AVOID           'A'
 #define CMD_MODE_BLUETOOTH       'X'
 
+// 速度微调指令（单字符，直接由蓝牙发送，替代原双字符 "00"/"11"）
+// 'm' -> 速度减1%
+// 'n' -> 速度加1%
+
 // 函数声明
 void Bluetooth_Init(void);
 void Bluetooth_SendByte(uint8_t byte);

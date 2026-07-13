@@ -73,6 +73,19 @@ uint8_t Sensor_ReadLine(void)
     else                            return LINE_LOST;
 }
 
+// 返回5路原始状态: bit0=最左(OUT1/PC7) ... bit4=最右(OUT5/PC11)
+// 1=压到黑线(灭/低电平 SENSOR_ON_LINE), 0=白面(亮/高电平)
+uint8_t Sensor_ReadBits(void)
+{
+    uint8_t b = 0;
+    if (Sensor_ReadSingle(SENSOR_1_PORT, SENSOR_1_PIN) == SENSOR_ON_LINE) b |= 0x01;
+    if (Sensor_ReadSingle(SENSOR_2_PORT, SENSOR_2_PIN) == SENSOR_ON_LINE) b |= 0x02;
+    if (Sensor_ReadSingle(SENSOR_3_PORT, SENSOR_3_PIN) == SENSOR_ON_LINE) b |= 0x04;
+    if (Sensor_ReadSingle(SENSOR_4_PORT, SENSOR_4_PIN) == SENSOR_ON_LINE) b |= 0x08;
+    if (Sensor_ReadSingle(SENSOR_5_PORT, SENSOR_5_PIN) == SENSOR_ON_LINE) b |= 0x10;
+    return b;
+}
+
 // ============================================
 // 超声波避障传感器（HC-SR04 兼容模块）
 // 测量方案：参考老师源码，采用 EXTI 外部中断(PC6 上升/下降沿)

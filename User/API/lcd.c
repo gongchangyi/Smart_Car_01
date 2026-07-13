@@ -1,7 +1,9 @@
 #include "lcd.h"
 #include "lcd_font.h"
+#ifdef ENABLE_ANIM
 #include "lcd_img.h"
 #include "lcd_anim.h"
+#endif
 #include "delay.h"
 
 // ============================================
@@ -196,6 +198,8 @@ void LCD_ShowChar(uint8_t x, uint8_t y, uint8_t chr, uint16_t fc, uint16_t bc)
     }
 }
 
+#ifdef ENABLE_ANIM
+
 // 全屏显示预存图片 (RGB565, 128x160)
 void LCD_ShowImage(void)
 {
@@ -229,6 +233,13 @@ uint8_t LCD_AnimFrameCount(void)
 {
     return FRAME_COUNT;
 }
+
+#else
+// 未启用图片功能：提供安全降级实现（固件不含位图数据，体积更小、烧录更快）
+void LCD_ShowImage(void) {}
+void LCD_ShowFrame(uint8_t idx) { (void)idx; }
+uint8_t LCD_AnimFrameCount(void) { return 0; }
+#endif
 
 void LCD_ShowString(uint8_t x, uint8_t y, const char* str, uint16_t fc, uint16_t bc)
 {

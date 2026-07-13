@@ -1,6 +1,7 @@
 #include "main.h"
 #include "lcd.h"
 #include "beep.h"
+#include "sensor.h"          // 红外循迹(5路: PC7~PC11)
 
 // 蓝牙遥控 - 8个指令控制4个轮子 + 超声波避障（V3:超声波测距+绕行避障）
 
@@ -8,6 +9,10 @@
 static uint8_t g_current_cmd = 0;  // 当前运动命令
 static uint8_t g_user_speed  = MOTOR_SPEED_DEFAULT;  // 用户设定的速度(0~100)
 static uint8_t g_show_image  = 0;   // 0=状态界面, 1=图片模式(发O切图片, 发P切回来)
+
+// 红外循迹模式（'H' 进入，收到运动指令'1'~'8'或紧急停止退出）
+static uint8_t  g_track_mode      = 0;   // 0=非循迹, 1=循迹模式
+static uint8_t  g_track_last      = 0;   // 上次循迹动作(避免每轮重复重启电机)
 
 // 动图播放状态 (发A开始, 发B/P返回; 与图片模式互斥)
 static uint8_t g_play_anim     = 0;   // 0=非动图, 1=播放动图
@@ -31,7 +36,9 @@ static uint8_t g_obstacle_count = 0;      // 连续检测到障碍物的次数
 #define USONIC_DEBOUNCE_THRESHOLD  2       // 连续2次确认才触发避障（超声波本身较稳定，不需要太多滤波）
 // 避障：判定成功后先停，再以 AVOID_SPIN_SPEED 原地转圈（右顺+左逆=cmd'5'）找空当；
 // 转圈中前方一畅通就直接前进；转满一圈仍被挡则后退一点换位置再转；总超时则停车。
-#define AVOID_SPIN_SPEED       38      // 避障转圈/后退时的临时速度(%)
+#define AVOID_SPIN_SPEED       40      // 避障转圈/后退时的临时速度(%)（用户要求40%）
+#define TRACK_SPEED            33      // 循迹正常行驶速度(%)（用户要求33%，慢一点方便判定方向）
+#define TRACK_SWING_SPEED      30      // 丢线后原地摆动找线速度(%)
 #define AVOID_SPIN_PER_ROUND   75      // 原地转一圈约需的 20ms 次数(@40%)，转满一圈仍堵则后退换位置
 #define AVOID_SPIN_TOTAL       600     // 避障总超时(600*20ms=12s)，超时则停车等待新指令
 #define AVOID_RETREAT_MS       300     // 每次后退的时长(ms)，"后退一点点"
@@ -141,7 +148,7 @@ static uint8_t Front_Blocked(void)
 }
 
 // 避障绕行动作（新方案）：
-//   判定成功后先停止 -> 以 30% 速度原地转圈（右侧顺时针+左侧逆时针=cmd'5'）找空当；
+//   判定成功后先停止 -> 以 40% 速度原地转圈（右侧顺时针+左侧逆时针=cmd'5'）找空当；
 //   转圈过程中若前方畅通，直接向前（恢复用户速度）；
 //   若转满一圈仍被挡（原地打转找不到空当），则后退一点点换位置，接着转，直到能前进；
 //   总超时(12s)仍被挡（封闭/宽墙）则停车等待新指令。
@@ -180,9 +187,9 @@ static uint8_t Avoid_Obstacle(void)
     // 1. 先停止
     All_Motor_Stop();
 
-    // 2. 以 30% 速度原地转圈（右顺+左逆 = cmd'5'），找空当
+    // 2. 以 40% 速度原地转圈（右顺+左逆 = cmd'5'），找空当
     Motor_SetSpeed(AVOID_SPIN_SPEED);
-    Bluetooth_SendString("AVOID:SPIN@38\r\n");
+    Bluetooth_SendString("AVOID:SPIN@40\r\n");
     Execute_Motion('5');                 // 左转圈（原地）
 
     while (spin < AVOID_SPIN_TOTAL)
@@ -340,6 +347,9 @@ int main(void)
     // 初始化超声波避障传感器
     USONIC_Init();
 
+    // 初始化红外循迹传感器(5路: PC7~PC11)
+    Sensor_Init();
+
     // 初始化 1.8寸 TFT LCD (ST7735, SPI2)
     LCD_Init();
 
@@ -381,6 +391,7 @@ int main(void)
             Motor_Stop();               // 再次确保停车
             g_current_cmd   = '2';
             g_obstacle_count = 0;
+            g_track_mode    = 0;        // 紧急停止同时退出循迹
             if(!g_show_image && !g_play_anim) LCD_UpdateStatus();
         }
 
@@ -440,29 +451,64 @@ int main(void)
                 LCD_UpdateStatus();
                 Bluetooth_SendString("LCD:STATUS\r\n");
             }
-            // 速度调节命令（'9'加速 / '0'减速）
-            if(cmd == '9' || cmd == '0')
+            else if (cmd == 'H')   // 进入红外循迹模式
             {
-                int ns = g_user_speed + (cmd == '9' ? 10 : -10);
-                if(ns > 100) ns = 100;
-                if(ns < 0)   ns = 0;
+                g_track_mode      = 1;
+                g_track_last      = 0;
+                g_user_speed      = TRACK_SPEED;   // 循迹默认35%，可用'm'/'n'微调±1%
+                Motor_SetSpeed(TRACK_SPEED);
+                g_current_cmd     = '3';
+                Execute_Motion('3');
+                Bluetooth_SendString("TRACK:ON\r\n");
+            }
+            // 速度微调: 'm'减1% / 'n'加1% (单字符, 循迹/手动模式下均生效)
+            else if (cmd == 'm' || cmd == 'n')
+            {
+                int ns = g_user_speed + (cmd == 'n' ? 1 : -1);
+                if (ns > 100) ns = 100;
+                if (ns < 0)   ns = 0;
                 g_user_speed = (uint8_t)ns;
                 Motor_SetSpeed(g_user_speed);
-                // 关键：用新速度立即刷新当前正在执行的动作（否则 CCR 不更新，调速无效）
-                if(g_current_cmd >= '1' && g_current_cmd <= '8')
+                Bluetooth_SendString("SPD:");
+                Bluetooth_SendByte('0' + g_user_speed / 10);
+                Bluetooth_SendByte('0' + g_user_speed % 10);
+                Bluetooth_SendString("%\r\n");
+                if (!g_show_image && !g_play_anim) LCD_UpdateStatus();
+            }
+            // 速度调节命令（'9'加速 / '0'减速）：循迹模式下固定速度, 调速忽略
+            else if (cmd == '9' || cmd == '0')
+            {
+                if (g_track_mode)
                 {
-                    Execute_Motion(g_current_cmd);
+                    Bluetooth_SendString("TRACK:FIXED-SPD\r\n");
+                }
+                else
+                {
+                    int ns = g_user_speed + (cmd == '9' ? 10 : -10);
+                    if(ns > 100) ns = 100;
+                    if(ns < 0)   ns = 0;
+                    g_user_speed = (uint8_t)ns;
+                    Motor_SetSpeed(g_user_speed);
+                    // 关键：用新速度立即刷新当前正在执行的动作（否则 CCR 不更新，调速无效）
+                    if(g_current_cmd >= '1' && g_current_cmd <= '8')
+                    {
+                        Execute_Motion(g_current_cmd);
+                    }
                 }
             }
-            else
+            // 运动/其他指令：若在循迹模式且为运动指令(1~8)，先退出循迹让指令立即生效
+            else if (cmd >= '1' && cmd <= '8')
             {
-                // 更新当前运动状态
+                if (g_track_mode)
+                {
+                    g_track_mode = 0;
+                    Bluetooth_SendString("TRACK:OFF\r\n");
+                }
                 g_current_cmd = cmd;
                 g_obstacle_count = 0;  // 新命令重置消抖计数器
-
-                // 执行运动命令
                 Execute_Motion(cmd);
             }
+            // 其他未识别字符：忽略
 
             // 回传当前速度
             Bluetooth_SendString("SPEED:");
@@ -488,6 +534,53 @@ int main(void)
                 g_anim_frame = (g_anim_frame + 1) % LCD_AnimFrameCount();
                 LCD_ShowFrame(g_anim_frame);
             }
+        }
+
+        // ===== 红外循迹控制（'H' 模式）=====
+        // 灯编号(左->右): 1=PC7(最左) 2=PC8(左) 3=PC9(中) 4=PC10(右) 5=PC11(最右)
+        // 位含义(Sensor_ReadBits): bit=1 表示 灯亮=压到黑线; bit=0 表示 灯灭=白面
+        // 直行条件: 灯2 与 灯4 同态(都亮 或 都灭) -> 方向正确, 直行
+        //   - 即用户要求: 灯3灭 且 (灯2亮&灯4亮 或 灯2灭&灯4灭) 时继续直行
+        //   - 也覆盖 灯3亮 且 灯2/灯4同态 的标准居中情形
+        // 纠偏: 灯2/灯4 不同态 -> 用弧线前进(边走边转)纠正, 方向修正如下:
+        if (g_track_mode)
+        {
+            uint8_t b  = Sensor_ReadBits();          // bit0=最左..bit4=最右, 1=灯亮(压黑线)
+            uint8_t s2 = (b & 0x02) ? 1 : 0;         // 灯2(左)
+            uint8_t s4 = (b & 0x08) ? 1 : 0;         // 灯4(右)
+
+            uint8_t tcmd = '3';
+            uint8_t tspd = g_user_speed;             // 直行用当前速度(默认35%, 可'm'/'n'微调)
+
+            if (s2 == s4)
+            {
+                // 灯2/灯4 同态(都亮或都灭): 方向正确, 直行(含用户要求的 灯3灭+2/4同态)
+                tcmd = '3';
+            }
+            else
+            {
+                // 灯2/灯4 不同态: 纠偏。用弧线前进(边走边转)代替原地打转,
+                // 这样在圆形黑线上能顺着弯道连续前进, 不再原地打转导致"慢/振荡"。
+                // 方向(按实测最终确认): 左灯(灯2)压线=车偏右 -> 左转弧线'7'; 右灯(灯4)压线=车偏左 -> 右转弧线'8'
+                tspd = g_user_speed;                // 弧线前进用当前速度(33%), 比原地打转快且连续
+                if (s2 && !s4)                       // 左灯亮(压线)、右灯灭 -> 左转弧线
+                {
+                    tcmd = '7';
+                }
+                else                                // 右灯亮(压线)、左灯灭 -> 右转弧线
+                {
+                    tcmd = '8';
+                }
+            }
+
+            // 状态变化才重启电机（同一动作不重复 All_Motor_Stop）
+            if (tcmd != g_track_last)
+            {
+                Motor_SetSpeed(tspd);
+                Execute_Motion(tcmd);
+                g_track_last = tcmd;
+            }
+            g_current_cmd = tcmd;   // 供超声波避障判断(前进'3'时遇障触发避障)
         }
 
         // 超声波周期测距（所有状态都测，间隔 >= 100ms 保护模块死区）
@@ -542,7 +635,8 @@ int main(void)
                 }
 
                 // 仅在前进/转圈状态下做障碍判断（用缓存的有效距离）
-                if(g_current_cmd == '3' || g_current_cmd == '5' || g_current_cmd == '6')
+                // 循迹模式(测试黑线)下关闭避障，避免误触发打断循迹
+                if(!g_track_mode && (g_current_cmd == '3' || g_current_cmd == '5' || g_current_cmd == '6'))
                 {
                     // 判断障碍：有效距离 < 动态阈值才触发（阈值随速度增大）
                     if(last_dist > 0 && last_dist < Obstacle_Threshold_CM())
@@ -555,6 +649,13 @@ int main(void)
 
                             // 执行绕行避障，获取恢复后的命令
                             g_current_cmd = Avoid_Obstacle();
+
+                            // 循迹模式下若避障超时停车，退出循迹等待新指令（避免反复前进撞墙）
+                            if (g_track_mode && g_current_cmd == '2')
+                            {
+                                g_track_mode = 0;
+                                Bluetooth_SendString("TRACK:OFF\r\n");
+                            }
 
                             // 关键修复：恢复前进/恢复运动必须真正执行，
                             // 否则车会停在 Avoid_Obstacle 内的 All_Motor_Stop 状态，

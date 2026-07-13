@@ -8,19 +8,19 @@
 // ============================================
 
 #define SENSOR_1_PORT       GPIOC
-#define SENSOR_1_PIN        GPIO_Pin_0       // 最左
+#define SENSOR_1_PIN        GPIO_Pin_7       // 最左 (OUT1)
 
 #define SENSOR_2_PORT       GPIOC
-#define SENSOR_2_PIN        GPIO_Pin_1       // 左
+#define SENSOR_2_PIN        GPIO_Pin_8       // 左   (OUT2)
 
 #define SENSOR_3_PORT       GPIOC
-#define SENSOR_3_PIN        GPIO_Pin_2       // 中
+#define SENSOR_3_PIN        GPIO_Pin_9       // 中   (OUT3)
 
 #define SENSOR_4_PORT       GPIOC
-#define SENSOR_4_PIN        GPIO_Pin_3       // 右
+#define SENSOR_4_PIN        GPIO_Pin_10      // 右   (OUT4)
 
 #define SENSOR_5_PORT       GPIOC
-#define SENSOR_5_PIN        GPIO_Pin_4       // 最右
+#define SENSOR_5_PIN        GPIO_Pin_11      // 最右 (OUT5)
 
 // 循迹状态（低电平有效：检测到黑线=0）
 #define SENSOR_ON_LINE      0
@@ -55,6 +55,7 @@
 // 函数声明：红外循迹
 void Sensor_Init(void);
 uint8_t Sensor_ReadLine(void);
+uint8_t Sensor_ReadBits(void);    // 返回5路原始状态(bit0=最左..bit4=最右, 1=压黑线)
 
 // 函数声明：超声波避障
 void USONIC_Init(void);
