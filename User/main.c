@@ -47,6 +47,11 @@ static uint8_t g_obstacle_count = 0;      // 连续检测到障碍物的次数
 #define AVOID_SPIN_TOTAL       600     // 避障总超时(600*20ms=12s)，超时则停车等待新指令
 #define AVOID_RETREAT_MS       300     // 每次后退的时长(ms)，"后退一点点"
 
+// 前向声明：状态页绘制函数定义在文件后部，需先声明供 ReturnToStatusPage 调用
+static void LCD_DrawTitle(void);
+static void LCD_DrawInfo(void);
+static void LCD_UpdateStatus(void);
+
 // 停止所有电机（互斥复位全部方向引脚，避免H桥直通）
 static void All_Motor_Stop(void)
 {
