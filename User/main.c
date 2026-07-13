@@ -13,6 +13,9 @@ static uint8_t g_show_image  = 0;   // 0=状态界面, 1=图片模式(发O切图
 // 红外循迹模式（'H' 进入，收到运动指令'1'~'8'或紧急停止退出）
 static uint8_t  g_track_mode      = 0;   // 0=非循迹, 1=循迹模式
 static uint8_t  g_track_last      = 0;   // 上次循迹动作(避免每轮重复重启电机)
+static uint8_t  g_track_lost      = 0;   // 丢线标志: 五灯全灭/全亮后正在旋转搜索黑线
+static uint8_t  g_track_alarm     = 0;   // 已报警标志: 避免 NO-LINE 重复刷屏
+static uint32_t g_track_lost_ms   = 0;   // 进入搜索的时刻(g_ms_tick), 用于超时判定
 
 // 动图播放状态 (发A开始, 发B/P返回; 与图片模式互斥)
 static uint8_t g_play_anim     = 0;   // 0=非动图, 1=播放动图
@@ -39,6 +42,7 @@ static uint8_t g_obstacle_count = 0;      // 连续检测到障碍物的次数
 #define AVOID_SPIN_SPEED       40      // 避障转圈/后退时的临时速度(%)（用户要求40%）
 #define TRACK_SPEED            33      // 循迹正常行驶速度(%)（用户要求33%，慢一点方便判定方向）
 #define TRACK_SWING_SPEED      30      // 丢线后原地摆动找线速度(%)
+#define TRACK_SEARCH_MS        6000    // 丢线后旋转搜索最长时长(ms, 约3圈); 超时未找到则停车报警等待干预
 #define AVOID_SPIN_PER_ROUND   75      // 原地转一圈约需的 20ms 次数(@40%)，转满一圈仍堵则后退换位置
 #define AVOID_SPIN_TOTAL       600     // 避障总超时(600*20ms=12s)，超时则停车等待新指令
 #define AVOID_RETREAT_MS       300     // 每次后退的时长(ms)，"后退一点点"
@@ -109,6 +113,31 @@ static void Execute_Motion(uint8_t cmd)
             // 右侧保持停止
             break;
     }
+}
+
+// 进入动图模式(若固件含动图数据); 返回 1=已开启, 0=无动图
+static uint8_t StartAnimMode(void)
+{
+    if (LCD_AnimFrameCount() == 0) return 0;
+    g_show_image   = 0;
+    g_play_anim    = 1;
+    g_anim_frame   = 0;
+    g_anim_last_ms = g_ms_tick;
+    LCD_Clear(LCD_BLACK);
+    LCD_ShowFrame(0);
+    return 1;
+}
+
+// 退出动图/静图模式, 返回状态信息页
+static void ReturnToStatusPage(void)
+{
+    uint8_t was_anim = g_play_anim;
+    g_show_image = 0;
+    g_play_anim  = 0;
+    if (was_anim) LCD_Clear(LCD_BLACK);
+    LCD_DrawTitle();
+    LCD_DrawInfo();
+    LCD_UpdateStatus();
 }
 
 // 根据当前速度动态计算避障判定距离。
@@ -392,6 +421,8 @@ int main(void)
             g_current_cmd   = '2';
             g_obstacle_count = 0;
             g_track_mode    = 0;        // 紧急停止同时退出循迹
+            g_track_lost    = 0;        // 清丢线搜索状态
+            BEEP_Off();                 // 关闭丢线持续报警
             if(!g_show_image && !g_play_anim) LCD_UpdateStatus();
         }
 
@@ -454,8 +485,10 @@ int main(void)
             else if (cmd == 'H')   // 进入红外循迹模式
             {
                 g_track_mode      = 1;
+                g_track_lost      = 0;   // 进入循迹清掉上次的丢线/报警状态
+                BEEP_Off();
                 g_track_last      = 0;
-                g_user_speed      = TRACK_SPEED;   // 循迹默认35%，可用'm'/'n'微调±1%
+                g_user_speed      = TRACK_SPEED;   // 循迹默认33%，仅'm'/'n'微调±1%('9'/'0'大调在循迹下忽略)
                 Motor_SetSpeed(TRACK_SPEED);
                 g_current_cmd     = '3';
                 Execute_Motion('3');
@@ -475,7 +508,7 @@ int main(void)
                 Bluetooth_SendString("%\r\n");
                 if (!g_show_image && !g_play_anim) LCD_UpdateStatus();
             }
-            // 速度调节命令（'9'加速 / '0'减速）：循迹模式下固定速度, 调速忽略
+            // 速度调节命令（'9'加速 / '0'减速）：循迹模式下固定速度, 大调忽略(仅'm'/'n'微调生效)
             else if (cmd == '9' || cmd == '0')
             {
                 if (g_track_mode)
@@ -545,42 +578,97 @@ int main(void)
         // 纠偏: 灯2/灯4 不同态 -> 用弧线前进(边走边转)纠正, 方向修正如下:
         if (g_track_mode)
         {
-            uint8_t b  = Sensor_ReadBits();          // bit0=最左..bit4=最右, 1=灯亮(压黑线)
+            uint8_t b  = Sensor_ReadBits();          // bit0=最左..bit4=最右, 1=灯灭(压黑线), 0=灯亮(白面)
             uint8_t s2 = (b & 0x02) ? 1 : 0;         // 灯2(左)
             uint8_t s4 = (b & 0x08) ? 1 : 0;         // 灯4(右)
 
-            uint8_t tcmd = '3';
-            uint8_t tspd = g_user_speed;             // 直行用当前速度(默认35%, 可'm'/'n'微调)
-
-            if (s2 == s4)
+            if (b == 0 || b == 0x1F)
             {
-                // 灯2/灯4 同态(都亮或都灭): 方向正确, 直行(含用户要求的 灯3灭+2/4同态)
-                tcmd = '3';
+                // ===== 五灯全亮(b==0,全在白面丢线) 或 五灯全灭(b==0x1F,全压黑块): 原地旋转搜索黑线 =====
+                // 策略: 持续原地转圈扫描, 直到扫到黑线(b 出现有效亮灯)才停; 绝不中途停车放弃。
+                // 超过 TRACK_SEARCH_MS 仍未找到 -> 持续蜂鸣器报警作为"仍在搜索"提示, 但继续旋转。
+                if (!g_track_lost)
+                {
+                    // 首次丢失: 立即进入原地旋转搜索
+                    g_track_lost    = 1;
+                    g_track_lost_ms = g_ms_tick;
+                    Motor_SetSpeed(TRACK_SWING_SPEED);
+                    Execute_Motion('5');              // 原地左转圈, 扫一圈找黑线
+                    g_track_last = '5';               // 标记当前动作为旋转
+                    Bluetooth_SendString("TRACK:LOST\r\n");
+                    StartAnimMode();                  // 丢线搜索期间播放动图
+                }
+                else
+                {
+                    // 搜索中: 在 TRACK_SEARCH_MS 窗口内持续原地旋转, 每轮重设动作防止被打断
+                    if ((g_ms_tick - g_track_lost_ms) >= TRACK_SEARCH_MS)
+                    {
+                        // 搜索超时(10s): 停车 + 持续报警, 等待用户把车放回黑线
+                        // 用户放回黑线(b 出现有效亮灯)即自动恢复, 无需重发 'H'
+                        if (!g_track_alarm)
+                        {
+                            All_Motor_Stop();
+                            BEEP_On();                // 持续报警(直到放回黑线自动关闭)
+                            Bluetooth_SendString("TRACK:NO-LINE\r\n");
+                            g_track_alarm = 1;
+                            ReturnToStatusPage();    // 超时停车, 返回状态信息页
+                        }
+                        g_track_last = 0;             // 标记已停车, 防止下方重设旋转
+                    }
+                    else if (g_track_last != '5')
+                    {
+                        // 仍在搜索窗口内: 持续旋转扫描黑线
+                        Motor_SetSpeed(TRACK_SWING_SPEED);
+                        Execute_Motion('5');
+                        g_track_last = '5';
+                    }
+                    // 注意: g_track_lost 保持=1, g_track_mode 保持=1, 不退出循迹
+                }
+                // 丢失/搜索期间不执行正常循迹逻辑
             }
             else
             {
-                // 灯2/灯4 不同态: 纠偏。用弧线前进(边走边转)代替原地打转,
-                // 这样在圆形黑线上能顺着弯道连续前进, 不再原地打转导致"慢/振荡"。
-                // 方向(按实测最终确认): 左灯(灯2)压线=车偏右 -> 左转弧线'7'; 右灯(灯4)压线=车偏左 -> 右转弧线'8'
-                tspd = g_user_speed;                // 弧线前进用当前速度(33%), 比原地打转快且连续
-                if (s2 && !s4)                       // 左灯亮(压线)、右灯灭 -> 左转弧线
+                // ===== 检测到黑线 =====
+                if (g_track_lost)
                 {
-                    tcmd = '7';
+                    g_track_lost  = 0;                // 已找回黑线, 退出搜索
+                    g_track_alarm = 0;                // 清报警标志
+                    BEEP_Off();
+                    Bluetooth_SendString("TRACK:FOUND\r\n");
+                    ReturnToStatusPage();            // 找回黑线, 返回状态信息页
                 }
-                else                                // 右灯亮(压线)、左灯灭 -> 右转弧线
-                {
-                    tcmd = '8';
-                }
-            }
 
-            // 状态变化才重启电机（同一动作不重复 All_Motor_Stop）
-            if (tcmd != g_track_last)
-            {
-                Motor_SetSpeed(tspd);
-                Execute_Motion(tcmd);
-                g_track_last = tcmd;
+                uint8_t tcmd = '3';
+                uint8_t tspd = g_user_speed;          // 直行用当前速度(33%, 可'm'/'n'微调)
+
+                if (s2 == s4)
+                {
+                    tcmd = '3';                       // 灯2/灯4 同态: 直行
+                }
+                else
+                {
+                    // 灯2/灯4 不同态: 弧线前进纠偏
+                    // 方向(实测确认): 左灯(灯2)压线=车偏右 -> 左转弧线'7'; 右灯(灯4)压线=车偏左 -> 右转弧线'8'
+                    tspd = g_user_speed;
+                    if (s2 && !s4)                    // 左灯亮(压线)、右灯灭 -> 左转弧线
+                    {
+                        tcmd = '7';
+                    }
+                    else                             // 右灯亮(压线)、左灯灭 -> 右转弧线
+                    {
+                        tcmd = '8';
+                    }
+                }
+
+                // 状态变化才重启电机（同一动作不重复 All_Motor_Stop）
+                if (tcmd != g_track_last)
+                {
+                    Motor_SetSpeed(tspd);
+                    Execute_Motion(tcmd);
+                    g_track_last = tcmd;
+                }
+                g_current_cmd = tcmd;   // 供超声波避障判断(前进'3'时遇障触发避障)
             }
-            g_current_cmd = tcmd;   // 供超声波避障判断(前进'3'时遇障触发避障)
         }
 
         // 超声波周期测距（所有状态都测，间隔 >= 100ms 保护模块死区）
