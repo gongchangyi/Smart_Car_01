@@ -2,8 +2,6 @@
 #include "lcd.h"
 #include "beep.h"
 #include "sensor.h"          // 红外循迹(5路: PC7~PC11)
-#include "wifi_uart.h"       // WiFi 图传模块控制串口(USART3)
-#include "gimbal.h"          // 双轴摄像头云台(PA8/PA11)
 
 // 蓝牙遥控 - 8个指令控制4个轮子 + 超声波避障（V3:超声波测距+绕行避障）
 
@@ -11,15 +9,10 @@
 static uint8_t g_current_cmd = 0;  // 当前运动命令
 static uint8_t g_user_speed  = MOTOR_SPEED_DEFAULT;  // 用户设定的速度(0~100)
 static uint8_t g_show_image  = 0;   // 0=状态界面, 1=图片模式(发O切图片, 发P切回来)
-// 成功 WiFi 工程将 WiFi 控制作为独立模式运行，不执行超声波避障。
-static uint8_t g_wifi_control_mode = 0;
 
 // 红外循迹模式（'H' 进入，收到运动指令'1'~'8'或紧急停止退出）
 static uint8_t  g_track_mode      = 0;   // 0=非循迹, 1=循迹模式
 static uint8_t  g_track_last      = 0;   // 上次循迹动作(避免每轮重复重启电机)
-static uint8_t  g_track_lost      = 0;   // 丢线标志: 五灯全亮(全白面)后正在旋转搜索黑线
-static uint8_t  g_track_alarm     = 0;   // 已报警标志: 避免 NO-LINE 重复刷屏
-static uint32_t g_track_lost_ms   = 0;   // 进入搜索的时刻(g_ms_tick), 用于超时判定
 
 // 动图播放状态 (发A开始, 发B/P返回; 与图片模式互斥)
 static uint8_t g_play_anim     = 0;   // 0=非动图, 1=播放动图
@@ -46,7 +39,6 @@ static uint8_t g_obstacle_count = 0;      // 连续检测到障碍物的次数
 #define AVOID_SPIN_SPEED       40      // 避障转圈/后退时的临时速度(%)（用户要求40%）
 #define TRACK_SPEED            33      // 循迹正常行驶速度(%)（用户要求33%，慢一点方便判定方向）
 #define TRACK_SWING_SPEED      30      // 丢线后原地摆动找线速度(%)
-#define TRACK_SEARCH_MS        6000    // 丢线后旋转搜索最长时长(ms, 约3圈); 超时未找到则停车报警等待干预
 #define AVOID_SPIN_PER_ROUND   75      // 原地转一圈约需的 20ms 次数(@40%)，转满一圈仍堵则后退换位置
 #define AVOID_SPIN_TOTAL       600     // 避障总超时(600*20ms=12s)，超时则停车等待新指令
 #define AVOID_RETREAT_MS       300     // 每次后退的时长(ms)，"后退一点点"
@@ -164,20 +156,14 @@ static uint8_t Front_Blocked(void)
 // 避障期间检查用户是否发来新遥控指令（'1'~'8'）或紧急停止，收到即中断、由用户接管。
 static uint8_t Avoid_UserAbort(void)
 {
-    // 避障循环会阻塞数秒，必须在这里继续处理 WiFi 帧；否则 WiFi 停止和
-    // 云台命令会积压到避障结束后才生效。
-    WifiUart_Process();
-
     // 最高优先级：中断已物理停车，这里同步逻辑状态并退出避障
-    if (Bluetooth_StopPending() || WifiUart_StopPending())
+    if (Bluetooth_StopPending())
     {
         Bluetooth_ClearStop();
-        WifiUart_ClearStop();
         g_current_cmd = '2';
         return '2';
     }
     uint8_t c = Bluetooth_GetCommand();
-    if (c == 0) c = WifiUart_GetCommand();
     if (c >= '1' && c <= '8')
     {
         g_current_cmd = c;   // 更新为用户的新指令
@@ -334,31 +320,6 @@ static void LCD_UpdateStatus(void)
     LCD_ShowStatus(48, 84, g_current_cmd);
 }
 
-// 进入动图模式(若固件含动图数据); 返回 1=已开启, 0=无动图
-static uint8_t StartAnimMode(void)
-{
-    if (LCD_AnimFrameCount() == 0) return 0;
-    g_show_image   = 0;
-    g_play_anim    = 1;
-    g_anim_frame   = 0;
-    g_anim_last_ms = g_ms_tick;
-    LCD_Clear(LCD_BLACK);
-    LCD_ShowFrame(0);
-    return 1;
-}
-
-// 退出动图/静图模式, 返回状态信息页
-static void ReturnToStatusPage(void)
-{
-    uint8_t was_anim = g_play_anim;
-    g_show_image = 0;
-    g_play_anim  = 0;
-    if (was_anim) LCD_Clear(LCD_BLACK);
-    LCD_DrawTitle();
-    LCD_DrawInfo();
-    LCD_UpdateStatus();
-}
-
 int main(void)
 {
     // 中断优先级分组
@@ -392,10 +353,6 @@ int main(void)
     // 初始化 1.8寸 TFT LCD (ST7735, SPI2)
     LCD_Init();
 
-    // WiFi 图传控制与摄像头云台。两者均使用厂家上位机的控制帧。
-    WifiUart_Init();
-    Gimbal_Init();
-
     // 诊断：打印 ECHO(PC6) 初始化后的实时电平，帮助判断硬件是否回波
     //   0 = 引脚常低（模块未回波/未工作）
     //   1 = 引脚被拉高（5V 电平问题，但 PB14/PC6 为 FT 引脚可耐受 5V）
@@ -425,35 +382,21 @@ int main(void)
     // 主循环
     while(1)
     {
-        Gimbal_Process();
         // ===== 紧急停止（最高优先级）=====
         // 串口中断收到 '2'/'4' 时已立即物理停车；这里同步逻辑状态，
         // 确保避障/恢复等任何逻辑都不会再把电机启动起来。
-        if(Bluetooth_StopPending() || WifiUart_StopPending())
+        if(Bluetooth_StopPending())
         {
             Bluetooth_ClearStop();
-            WifiUart_ClearStop();
             Motor_Stop();               // 再次确保停车
             g_current_cmd   = '2';
             g_obstacle_count = 0;
             g_track_mode    = 0;        // 紧急停止同时退出循迹
-            g_track_lost    = 0;        // 清丢线搜索状态
-            BEEP_Off();                 // 关闭丢线持续报警
             if(!g_show_image && !g_play_anim) LCD_UpdateStatus();
         }
 
-        // 先解析 WiFi 收到的完整数据块，再读取蓝牙/WiFi 命令。
-        WifiUart_Process();
+        // 获取蓝牙命令
         uint8_t cmd = Bluetooth_GetCommand();
-        if (cmd == 0)
-        {
-            cmd = WifiUart_GetCommand();
-            if (cmd != 0) g_wifi_control_mode = 1;
-        }
-        else
-        {
-            g_wifi_control_mode = 0;
-        }
 
         if(cmd != 0)
         {
@@ -508,18 +451,11 @@ int main(void)
                 LCD_UpdateStatus();
                 Bluetooth_SendString("LCD:STATUS\r\n");
             }
-            else if (cmd == 'l') { Gimbal_Nudge(1, +1); }
-            else if (cmd == 'r') { Gimbal_Nudge(1, -1); }
-            else if (cmd == 'u') { Gimbal_Nudge(2, +1); }
-            else if (cmd == 'd') { Gimbal_Nudge(2, -1); }
-            else if (cmd == 'c') { Gimbal_Center(); }
             else if (cmd == 'H')   // 进入红外循迹模式
             {
                 g_track_mode      = 1;
-                g_track_lost      = 0;   // 进入循迹清掉上次的丢线/报警状态
-                BEEP_Off();
                 g_track_last      = 0;
-                g_user_speed      = TRACK_SPEED;   // 循迹默认33%，仅'm'/'n'微调±1%('9'/'0'大调在循迹下忽略)
+                g_user_speed      = TRACK_SPEED;   // 循迹默认35%，可用'm'/'n'微调±1%
                 Motor_SetSpeed(TRACK_SPEED);
                 g_current_cmd     = '3';
                 Execute_Motion('3');
@@ -559,13 +495,6 @@ int main(void)
                         Execute_Motion(g_current_cmd);
                     }
                 }
-            }
-            else if (cmd == 'N')
-            {
-                g_user_speed = MOTOR_SPEED_DEFAULT;
-                Motor_SetSpeed(g_user_speed);
-                if(g_current_cmd >= '1' && g_current_cmd <= '8')
-                    Execute_Motion(g_current_cmd);
             }
             // 运动/其他指令：若在循迹模式且为运动指令(1~8)，先退出循迹让指令立即生效
             else if (cmd >= '1' && cmd <= '8')
@@ -707,8 +636,7 @@ int main(void)
 
                 // 仅在前进/转圈状态下做障碍判断（用缓存的有效距离）
                 // 循迹模式(测试黑线)下关闭避障，避免误触发打断循迹
-                if(!g_track_mode && !g_wifi_control_mode &&
-                   (g_current_cmd == '3' || g_current_cmd == '5' || g_current_cmd == '6'))
+                if(!g_track_mode && (g_current_cmd == '3' || g_current_cmd == '5' || g_current_cmd == '6'))
                 {
                     // 判断障碍：有效距离 < 动态阈值才触发（阈值随速度增大）
                     if(last_dist > 0 && last_dist < Obstacle_Threshold_CM())

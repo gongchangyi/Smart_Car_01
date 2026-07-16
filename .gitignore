@@ -31,3 +31,13 @@ Desktop.ini
 
 # ---- 编译/构建日志 ----
 rebuild_log*.txt
+build_log*.txt
+
+# ---- Python 虚拟环境 / 缓存 ----
+.venv*/
+__pycache__/
+*.pyc
+
+# ---- 临时备份文件 ----
+*.tmp
+*_main.c.bak
